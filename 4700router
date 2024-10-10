@@ -1,23 +1,30 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse
+import json
+import select
+import socket
 
 
 class Router:
     relations = {}
     sockets = {}
     ports = {}
+    update_msgs = []
+    # KV pair of ip and port
+    forwarding_table = {}
 
     def __init__(self, asn, connections):
         print("Router at AS %s starting up" % asn)
         self.asn = asn
+
         for relationship in connections:
             port, neighbor, relation = relationship.split("-")
-
             self.sockets[neighbor] = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             self.sockets[neighbor].bind(('localhost', 0))
             self.ports[neighbor] = int(port)
             self.relations[neighbor] = relation
+            # The started code already sends the handshake messages
             self.send(neighbor,
                       json.dumps({"type": "handshake", "src": self.our_addr(neighbor), "dst": neighbor, "msg": {}}))
 
@@ -29,19 +36,49 @@ class Router:
     def send(self, network, message):
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
+    def advertise_path(self, msg, receive_network):
+        # Advertise the path to everyone on the network
+        for network in self.sockets:
+            if network != receive_network:
+                # Form a new update message here
+                update_msg = {"type": "update", "src": self.our_addr(network), "dst": network, "msg": {
+                    "network": msg["network"],
+                    "netmask": msg["netmask"],
+                    "ASPath": [self.asn] + msg["ASPath"],
+                }}
+                self.sockets[network].sendto(json.dumps(update_msg).encode('utf-8'), ('localhost', self.ports[network]))
+
     def run(self):
         while True:
             socks = select.select(self.sockets.values(), [], [], 0.1)[0]
             for conn in socks:
                 k, addr = conn.recvfrom(65535)
-                srcif = None
-                for sock in self.sockets:
-                    if self.sockets[sock] == conn:
-                        srcif = sock
+                src_network = None
+                # self.sockets is a key value pair of network --> socket
+                for network in self.sockets:
+                    if self.sockets[network] == conn:
+                        src_network = network
                         break
                 msg = k.decode('utf-8')
+                print("Received message '%s' from %s" % (msg, src_network))
+                # This is the place where router receives the message
+                # Now router has to decide what to do with it
+                # TODO: This is basic af, can be changed later
+                parsed_msg = json.loads(msg)
+                if parsed_msg['type'] == 'update':
+                    # Save the update message (in case of withdrawal later)
+                    self.update_msgs.append(parsed_msg)
+                    # Key value of IP and socket to send to
+                    self.forwarding_table[parsed_msg['msg']['network']] = self.sockets[src_network]
+                    # Advertise the new route to the other routers
+                    self.advertise_path(parsed_msg['msg'], src_network)
+                elif parsed_msg['type'] == 'data':
+                    # Check the forwarding table for the match and forward to the specific port
+                    src = parsed_msg['src']  # I don't care about this for now
+                    dst = parsed_msg['dst']
+                    # TODO : Find the longest common prefix match from the forwarding table
 
-                print("Received message '%s' from %s" % (msg, srcif))
+
         return
 
 
