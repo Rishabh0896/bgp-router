@@ -276,16 +276,17 @@ class Router:
         """
         self.sockets[network].sendto(message.encode('utf-8'), ('localhost', self.ports[network]))
 
-    def advertise_update(self, msg: Dict, receive_network: str) -> None:
+    def advertise_update(self, msg: Dict, source_network: str) -> None:
         """
         Advertises a network path to all neighbors except the one from which the message was received.
 
         Args:
             msg (Dict): The message containing network path information.
-            receive_network (str): The network from which the message was received.
+            source_network (str): The network from which the message was received.
         """
         for network in self.sockets:
-            if network != receive_network:
+            if (network != source_network
+                    and self.is_transit_allowed(self.relations[source_network], self.relations[network])):
                 # Form a new update message here
                 update_msg = {"type": "update", "src": self.our_addr(network), "dst": network, "msg": {
                     "network": msg["network"],
@@ -296,7 +297,8 @@ class Router:
 
     def advertise_withdraw(self, msg: Dict, receive_network: str) -> None:
         for network in self.sockets:
-            if network != receive_network:
+            if (network != receive_network
+                    and self.is_transit_allowed(self.relations[receive_network], self.relations[network])):
                 # Form a new update message here
                 withdraw_msg = {"type": "withdraw", "src": self.our_addr(network), "dst": network, "msg": [{
                     "network": msg[0]["network"],
@@ -371,9 +373,15 @@ class Router:
         """Handle 'data' message type."""
         dst = parsed_msg['dst']
         next_hop_ip = self.routing_table.find_best_route(dst)
+        src_relation = self.relations[src_network]
+        dst_relation = self.relations.get(next_hop_ip)
 
         if next_hop_ip:
-            self.send(next_hop_ip, json.dumps(parsed_msg))
+            if self.is_transit_allowed(src_relation, dst_relation):
+                self.send(next_hop_ip, json.dumps(parsed_msg))
+            else:
+                self.send_no_route_message(parsed_msg, src_network)
+                print("Dropping message")
         else:
             self.send_no_route_message(parsed_msg, src_network)
 
@@ -401,10 +409,26 @@ class Router:
     def send_no_route_message(self, parsed_msg: Dict[str, Any], src_network: str):
         """Send a 'no route' message when no route is found."""
         no_route_message = {
-            "src": self.our_addr(parsed_msg['network']),
-            "dst": parsed_msg['src'],
+            "src": self.our_addr(src_network),
+            "dst": src_network,
             "type": "no route",
-            "msg": parsed_msg['msg'],
+            "msg": parsed_msg,
         }
-        self.send(parsed_msg['network'], json.dumps(no_route_message))
+        self.send(src_network, json.dumps(no_route_message))
         print(f"No route found for destination {parsed_msg['dst']}. Dropping packet.")
+
+    def is_transit_allowed(self, src_relation: str, dst_relation: str) -> bool:
+        """
+        Determines if transit is allowed based on the source and destination relationships.
+
+        Args:
+            src_relation (str): The relationship with the source network.
+            dst_relation (str): The relationship with the destination network.
+
+        Returns:
+            bool: True if transit is allowed, False otherwise.
+        """
+        if src_relation == 'cust' or dst_relation == 'cust':
+            return True  # Always allow transit from customers
+        return False
+
