@@ -51,7 +51,7 @@ class RoutingTable:
     def __init__(self):
         self.routes: Dict[Network, List[RouteEntry]] = defaultdict(list)
 
-    def add_route(self, network: str, subnet_mask: str, next_hop_ip: IPAddress, local_pref: int,
+    def add_route(self, network: str, subnet_mask: str, next_hop_ip: str, local_pref: int,
                   as_path: List[int], origin: str, self_origin: bool) -> None:
         """
         Adds a new route to the routing table.
@@ -69,76 +69,115 @@ class RoutingTable:
         network_key = Network(network, subnet_mask)
         self.routes[network_key].append(entry)
 
-    @staticmethod
-    def longest_prefix_match(network_ip: IPAddress, ip_to_check: IPAddress, subnet_mask: IPAddress) -> int:
-        """
-        Finds the length of the longest matching prefix between two IP addresses based on the subnet mask.
+    def get_prefix_length(self, network_ip: str, ip_to_check: str) -> int:
+        for i, (a, b) in enumerate(zip(network_ip, ip_to_check)):
+            if a != b:
+                return i
+        return len(network_ip)
 
-        Args:
-            network_ip (IPAddress): The network IP address.
-            ip_to_check (IPAddress): The IP address to check for matching.
-            subnet_mask (IPAddress): The subnet mask.
-
-        Returns:
-            int: The length of the longest matching prefix.
-        """
-        longest_prefix = 0
-        for net_octet, check_octet, mask_octet in zip(network_ip.octets, ip_to_check.octets, subnet_mask.octets):
-            for bit in range(7, -1, -1):
-                mask_bit = (mask_octet >> bit) & 1
-                if mask_bit == 0:
-                    return longest_prefix
-
-                net_bit = (net_octet >> bit) & 1
-                check_bit = (check_octet >> bit) & 1
-
-                if net_bit == check_bit:
-                    longest_prefix += 1
-                else:
-                    return longest_prefix
-        return longest_prefix
-
-    def find_best_route(self, ip_string: str) -> str | None:
-        """
-        Finds the best route for the given IP address based on the longest prefix match.
-
-        Args:
-            ip_string (str): The IP address to find the best route for.
-
-        Returns:
-            Optional[IPAddress]: The next hop IP address if a route is found, otherwise None.
-        """
+    def find_longest_prefix_matches(self, ip_string: str):
         ip_to_check = IPAddress(ip_string)
-        matching_routes = []
+        ip_to_check_binary = ip_to_check.to_binary()
+        matches = []
+        longest_prefix = -1
+        debug_info = []
 
-        for network, route_entries in self.routes.items():
-            match_length = self.longest_prefix_match(network.ip, ip_to_check, network.mask)
-            if match_length > 0:
-                for route in route_entries:
-                    matching_routes.append((match_length, network, route))
+        for network, routes in self.routes.items():
+            network_ip_binary = network.ip.to_binary()
+            network_mask_binary = network.mask.to_binary()
 
-        if not matching_routes:
+            # Network Subnet Mask & Network IP --> R1
+            r1 = ''.join([str(int(a) & int(b)) for a, b in zip(network_mask_binary, network_ip_binary)])
+
+            # Count the number of ones in subnet mask
+            number_of_ones_in_mask = network_mask_binary.count('1')
+
+            # Network Block
+            network_block = r1[:number_of_ones_in_mask]
+
+            # Check if IP matches the network block
+            if ip_to_check_binary.startswith(network_block):
+                prefix_match = self.get_prefix_length(network_ip_binary, ip_to_check_binary)
+                matches.append((network, prefix_match))
+                longest_prefix = max(longest_prefix, prefix_match)
+
+                debug_info.append({
+                    "network": str(network),
+                    "network_block": network_block,
+                    "prefix_match": prefix_match
+                })
+
+        # Filter matches to only include those with the longest prefix
+        longest_prefix_matches = [network for network, prefix in matches if prefix == longest_prefix]
+
+        return longest_prefix_matches
+
+    def find_best_route(self, ip_string: str) -> Optional[str]:
+        longest_prefix_matches = self.find_longest_prefix_matches(ip_string)
+
+        if not longest_prefix_matches:
             return None
 
-        # Sort matching routes by prefix length (descending)
-        matching_routes.sort(key=lambda x: x[0], reverse=True)
-        max_prefix_length = matching_routes[0][0]
+        best_route = None
+        best_route_score = (-float('inf'),) * 5  # Initialize with worst possible score
 
-        # Filter routes with the longest prefix match
-        best_matches = [r for r in matching_routes if r[0] == max_prefix_length]
+        for network in longest_prefix_matches:
+            for route in self.routes[network]:
+                current_score = (
+                    route.local_pref,
+                    route.self_origin,
+                    -len(route.as_path),
+                    {'IGP': 2, 'EGP': 1, 'UNK': 0}[route.origin],
+                    -route.next_hop_ip.to_binary().count('1')
+                )
+                if current_score > best_route_score:
+                    best_route_score = current_score
+                    best_route = route
 
-        def tie_break_key(match):
-            _, _, route = match
-            return (
-                route.local_pref,
-                route.self_origin,
-                -len(route.as_path),
-                {'IGP': 2, 'EGP': 1, 'UNK': 0}[route.origin],
-                -route.next_hop_ip.to_int()
-            )
+        return str(best_route.next_hop_ip) if best_route else None
 
-        best_route = max(best_matches, key=tie_break_key)
-        return str(best_route[2].next_hop_ip)
+
+    # def find_best_route(self, ip_string: str) -> str | None:
+    #     """
+    #     Finds the best route for the given IP address based on the longest prefix match.
+    #
+    #     Args:
+    #         ip_string (str): The IP address to find the best route for.
+    #
+    #     Returns:
+    #         Optional[IPAddress]: The next hop IP address if a route is found, otherwise None.
+    #     """
+    #     ip_to_check = IPAddress(ip_string)
+    #     matching_routes = []
+    #
+    #     for network, route_entries in self.routes.items():
+    #         match_length = self.get_prefix_length(network.ip, ip_to_check)
+    #         if match_length > 0:
+    #             for route in route_entries:
+    #                 matching_routes.append((match_length, network, route))
+    #
+    #     if not matching_routes:
+    #         return None
+    #
+    #     # Sort matching routes by prefix length (descending)
+    #     matching_routes.sort(key=lambda x: x[0], reverse=True)
+    #     max_prefix_length = matching_routes[0][0]
+    #
+    #     # Filter routes with the longest prefix match
+    #     best_matches = [r for r in matching_routes if r[0] == max_prefix_length]
+    #
+    #     def tie_break_key(match):
+    #         _, _, route = match
+    #         return (
+    #             route.local_pref,
+    #             route.self_origin,
+    #             -len(route.as_path),
+    #             {'IGP': 2, 'EGP': 1, 'UNK': 0}[route.origin],
+    #             -route.next_hop_ip.to_int()
+    #         )
+    #
+    #     best_route = max(best_matches, key=tie_break_key)
+    #     return str(best_route[2].next_hop_ip)
 
     def remove_route(self, network_str: str, subnet_mask: str, next_hop_ip: str) -> None:
         """
@@ -431,4 +470,3 @@ class Router:
         if src_relation == 'cust' or dst_relation == 'cust':
             return True  # Always allow transit from customers
         return False
-

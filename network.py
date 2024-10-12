@@ -8,6 +8,9 @@ class IPAddress:
     def to_int(self):
         return sum(octet << (24 - 8 * i) for i, octet in enumerate(self.octets))
 
+    def to_binary(self):
+        return ''.join([format(octet, '08b') for octet in self.octets])
+
     def __lt__(self, other):
         return self.to_int() < other.to_int()
 
@@ -25,3 +28,4 @@ class Network:
 
     def __eq__(self, other):
         return str(self.ip) == str(other.ip) and str(self.mask) == str(other.mask)
+
