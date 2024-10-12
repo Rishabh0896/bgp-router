@@ -2,7 +2,7 @@ import json
 import select
 import socket
 from collections import defaultdict
-from typing import List, Dict, Union, Optional
+from typing import List, Dict, Union, Optional, Any, Callable
 
 from network import IPAddress, Network
 
@@ -332,56 +332,79 @@ class Router:
                 # This is the place where router receives the message
                 # Now router has to decide what to do with it
                 parsed_msg = json.loads(msg)
-                if parsed_msg['type'] == 'update':
-                    # Save the update message for future use (e.g., withdrawals).
-                    self.update_msgs.append(parsed_msg)
+                self.process_message(parsed_msg, src_network)
 
-                    # Add the new route to the routing table.
-                    self.routing_table.add_route(
-                        parsed_msg['msg']['network'], parsed_msg['msg']['netmask'],
-                        parsed_msg['src'], parsed_msg['msg']['localpref'],
-                        parsed_msg['msg']['ASPath'], parsed_msg['msg']['origin'],
-                        parsed_msg['msg']['selfOrigin']
-                    )
+    def process_message(self, parsed_msg: Dict[str, Any], src_network: str):
+        """
+        Process the received message based on its type.
 
-                    # Advertise the new route to other routers (excluding the sender).
-                    self.advertise_update(parsed_msg['msg'], src_network)
+        Args:
+            parsed_msg (Dict[str, Any]): The parsed message.
+            src_network (str): The source network of the message.
+        """
+        message_handlers: Dict[str, Callable[[Dict[str, Any], str], None]] = {
+            'update': self.handle_update,
+            'data': self.handle_data,
+            'dump': self.handle_dump,
+            'withdraw': self.handle_withdraw
+        }
 
-                elif parsed_msg['type'] == 'data':
-                    # Route the data packet to its destination using the routing table.
-                    dst = parsed_msg['dst']
-                    next_hop_ip = self.routing_table.find_best_route(dst)
+        msg_type = parsed_msg['type']
+        handler = message_handlers.get(msg_type)
+        if handler:
+            handler(parsed_msg, src_network)
+        else:
+            print(f"Unknown message type: {msg_type}")
 
-                    # Log the routing decision and forward the message.
-                    if next_hop_ip:
-                        self.send(next_hop_ip, msg)
-                    else:
-                        no_route_message = {
-                            "src": self.our_addr(parsed_msg['network']),
-                            "dst": parsed_msg['src'],
-                            "type": "no route",
-                            "msg": parsed_msg['msg'],
-                        }
-                        self.send(parsed_msg['network'], json.dumps(no_route_message))
-                        print(f"No route found for destination {dst}. Dropping packet.")
+    def handle_update(self, parsed_msg: Dict[str, Any], src_network: str):
+        """Handle 'update' message type."""
+        self.update_msgs.append(parsed_msg)
+        self.routing_table.add_route(
+            parsed_msg['msg']['network'], parsed_msg['msg']['netmask'],
+            parsed_msg['src'], parsed_msg['msg']['localpref'],
+            parsed_msg['msg']['ASPath'], parsed_msg['msg']['origin'],
+            parsed_msg['msg']['selfOrigin']
+        )
+        self.advertise_update(parsed_msg['msg'], src_network)
 
-                elif parsed_msg['type'] == 'dump':
-                    # Respond to the sender with the current routing table.
-                    dump_response = {
-                        "type": "table",
-                        "src": parsed_msg['src'],
-                        "dst": parsed_msg['dst'],
-                        "msg": self.routing_table.dump_table()
-                    }
-                    dump_msg = json.dumps(dump_response)
-                    self.send(parsed_msg['src'], dump_msg)
+    def handle_data(self, parsed_msg: Dict[str, Any], src_network: str):
+        """Handle 'data' message type."""
+        dst = parsed_msg['dst']
+        next_hop_ip = self.routing_table.find_best_route(dst)
 
-                elif parsed_msg['type'] == 'withdraw':
-                    # Remove path from the routing table
-                    print(f"Routing Table before withdraw \n{self.routing_table}")
+        if next_hop_ip:
+            self.send(next_hop_ip, json.dumps(parsed_msg))
+        else:
+            self.send_no_route_message(parsed_msg, src_network)
 
-                    self.routing_table.remove_route(parsed_msg['msg'][0]['network'], parsed_msg['msg'][0]['netmask'],
-                                                    parsed_msg['src'])
-                    print(f"Routing Table after withdraw \nss{self.routing_table}")
-                    # Advertise the withdrawal message to the neighbouring routers
-                    self.advertise_withdraw(parsed_msg['msg'], src_network)
+    def handle_dump(self, parsed_msg: Dict[str, Any], src_network: str):
+        """Handle 'dump' message type."""
+        dump_response = {
+            "type": "table",
+            "src": parsed_msg['dst'],
+            "dst": parsed_msg['src'],
+            "msg": self.routing_table.dump_table()
+        }
+        self.send(parsed_msg['src'], json.dumps(dump_response))
+
+    def handle_withdraw(self, parsed_msg: Dict[str, Any], src_network: str):
+        """Handle 'withdraw' message type."""
+        print(f"Routing Table before withdraw:\n{self.routing_table}")
+        self.routing_table.remove_route(
+            parsed_msg['msg'][0]['network'],
+            parsed_msg['msg'][0]['netmask'],
+            parsed_msg['src']
+        )
+        print(f"Routing Table after withdraw:\n{self.routing_table}")
+        self.advertise_withdraw(parsed_msg['msg'], src_network)
+
+    def send_no_route_message(self, parsed_msg: Dict[str, Any], src_network: str):
+        """Send a 'no route' message when no route is found."""
+        no_route_message = {
+            "src": self.our_addr(parsed_msg['network']),
+            "dst": parsed_msg['src'],
+            "type": "no route",
+            "msg": parsed_msg['msg'],
+        }
+        self.send(parsed_msg['network'], json.dumps(no_route_message))
+        print(f"No route found for destination {parsed_msg['dst']}. Dropping packet.")
