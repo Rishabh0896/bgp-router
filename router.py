@@ -79,6 +79,9 @@ class RoutingTable:
         network_key = Network(network, subnet_mask)
         self.routes[network_key].append(entry)
 
+        # Check for aggregations
+        self.aggregate_networks()
+
     def get_prefix_length(self, network_ip: str, ip_to_check: str) -> int:
         """
         Calculate the length of the matching prefix between two IP addresses in binary form.
@@ -185,26 +188,6 @@ class RoutingTable:
                 network_ip, network_mask, next_hop_ip = key
                 self.add_route(network_ip, network_mask, next_hop_ip, msg['msg']['localpref'], msg['msg']['ASPath'],
                                msg['msg']['origin'], msg['msg']['selfOrigin'])
-            self.aggregate_networks()
-
-    def update_route(self, network_str: str, subnet_mask: str, next_hop_ip: IPAddress,
-                     **kwargs: Union[str, int, List[int]]) -> None:
-        """
-        Updates an existing route in the routing table with new values.
-
-        Args:
-            network_str (str): The network address of the route to update.
-            subnet_mask (str): The subnet mask of the network.
-            next_hop_ip (IPAddress): The next hop IP address of the route to update.
-            **kwargs: Arbitrary keyword arguments representing the attributes to update.
-        """
-        network_key = Network(network_str, subnet_mask)
-        if network_key in self.routes:
-            for route in self.routes[network_key]:
-                if route.next_hop_ip == next_hop_ip:
-                    for key, value in kwargs.items():
-                        setattr(route, key, value)
-                    break
 
     def __str__(self) -> str:
         """
@@ -454,8 +437,6 @@ class Router:
             parsed_msg['msg']['selfOrigin']
         )
         self.advertise_update(parsed_msg['msg'], src_network)
-        # Check for aggregations
-        self.routing_table.aggregate_networks()
 
     def handle_data(self, parsed_msg: Dict[str, Any], src_network: str):
         """Handle 'data' message type."""
