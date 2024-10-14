@@ -39,6 +39,11 @@ class RouteEntry:
                 f"Origin: {self.origin}, "
                 f"Self Origin: {self.self_origin}")
 
+    def __eq__(self, other) -> bool:
+        return (self.as_path == other.as_path and self.next_hop_ip == other.next_hop_ip
+                and self.local_pref and other.local_pref and self.origin == other.origin
+                and self.self_origin == other.self_origin)
+
 
 class RoutingTable:
     """
@@ -53,6 +58,8 @@ class RoutingTable:
         Initializes an empty routing table.
         """
         self.routes: Dict[Network, List[RouteEntry]] = defaultdict(list)
+        # Save the Network IP and Netmask and Hop_ip as key and the update message as value
+        self.update_msgs: Dict[(str, str, str), Dict[str, Any]] = defaultdict(dict)
 
     def add_route(self, network: str, subnet_mask: str, next_hop_ip: str, local_pref: int,
                   as_path: List[int], origin: str, self_origin: bool) -> None:
@@ -88,6 +95,12 @@ class RoutingTable:
                 return i
         return len(network_ip)
 
+    def _extract_network_block(self, network: Network) -> str:
+        network_ip_binary = network.ip.to_binary()
+        network_mask_binary = network.mask.to_binary()
+        r1 = ''.join(str(int(a) & int(b)) for a, b in zip(network_ip_binary, network_mask_binary))
+        return r1[:network_mask_binary.count('1')]
+
     def find_longest_prefix_matches(self, ip_string: str) -> List[Network]:
         """
         Find all networks in the routing table that match the given IP address with the longest prefix.
@@ -104,14 +117,10 @@ class RoutingTable:
         longest_prefix = -1
 
         for network, routes in self.routes.items():
-            network_ip_binary = network.ip.to_binary()
-            network_mask_binary = network.mask.to_binary()
-
-            r1 = ''.join(str(int(a) & int(b)) for a, b in zip(network_ip_binary, network_mask_binary))
-            network_block = r1[:network_mask_binary.count('1')]
+            network_block = self._extract_network_block(network)
 
             if ip_to_check_binary.startswith(network_block):
-                prefix_match = self.get_prefix_length(network_ip_binary, ip_to_check_binary)
+                prefix_match = self.get_prefix_length(network.ip.to_binary(), ip_to_check_binary)
                 matches.append((network, prefix_match))
                 longest_prefix = max(longest_prefix, prefix_match)
 
@@ -168,6 +177,15 @@ class RoutingTable:
                                         if str(route.next_hop_ip) != next_hop_ip]
             if not self.routes[network_key]:
                 del self.routes[network_key]
+        else:
+            # Possible aggregation so rebuild the entire routing table based on the update messages
+            # Empty the whole routing table and recreate based on the update_msgs dictionary
+            self.routes.clear()
+            for key, msg in self.update_msgs.items():
+                network_ip, network_mask, next_hop_ip = key
+                self.add_route(network_ip, network_mask, next_hop_ip, msg['msg']['localpref'], msg['msg']['ASPath'],
+                               msg['msg']['origin'], msg['msg']['selfOrigin'])
+            self.aggregate_networks()
 
     def update_route(self, network_str: str, subnet_mask: str, next_hop_ip: IPAddress,
                      **kwargs: Union[str, int, List[int]]) -> None:
@@ -216,6 +234,55 @@ class RoutingTable:
 
         return table_str
 
+    def can_networks_aggregate(self, network_i, network_j):
+        route_i = self.routes[network_i]
+        route_j = self.routes[network_j]
+        if route_i != route_j:
+            return False
+        network_block_i = self._extract_network_block(network_i)
+        network_block_j = self._extract_network_block(network_j)
+        # Check if the last character is different in the network block
+        if len(network_block_i) != len(network_block_j):
+            return False
+        for i in range(len(network_block_i) - 1):
+            if network_block_i[i] != network_block_j[i]:
+                return False
+        if network_block_i[-1] == network_block_j[-1]:
+            return False
+        return True
+
+    def aggregate_networks(self):
+        while True:
+            aggregate = False
+            # Loop through all the networks present in the routing table
+            all_networks = list(self.routes.keys())
+            for i in range(len(all_networks)):
+                for j in range(i + 1, len(all_networks)):
+                    # Compare every two and check if they can be aggregated
+                    if self.can_networks_aggregate(all_networks[i], all_networks[j]):
+                        # Aggregate network_i and network_j
+                        new_netmask = all_networks[i].mask
+                        # Convert to binary string
+                        binary_mask = new_netmask.octets_to_binary()
+                        # Find the position of the last '1' in the binary string
+                        last_one_index = binary_mask.rfind('1')
+
+                        modified_binary = binary_mask[:last_one_index] + '0' + binary_mask[last_one_index + 1:]
+
+                        # Convert the modified binary string back to octets
+                        new_netmask = IPAddress.binary_to_ip_string(modified_binary)
+                        new_network_ip = min(all_networks[i].ip, all_networks[j].ip)
+                        new_network = Network(str(new_network_ip), new_netmask)
+                        old_route = self.routes[all_networks[i]]
+                        # Delete old routes
+                        del self.routes[all_networks[i]]
+                        del self.routes[all_networks[j]]
+                        # Add new aggregated route
+                        self.routes[new_network] = old_route
+                        aggregate = True
+            if not aggregate:
+                return
+
     def dump_table(self) -> List[Dict[str, Union[str, int, List[int], bool]]]:
         """
         Dumps the routing table into a list of dictionaries for serialization or transmission.
@@ -254,7 +321,6 @@ class Router:
     relations: Dict[str, str] = {}
     sockets: Dict[str, socket.socket] = {}
     ports: Dict[str, int] = {}
-    update_msgs: List[Dict] = []
 
     def __init__(self, asn: int, connections: List[str]):
         print("Router at AS %s starting up" % asn)
@@ -379,7 +445,8 @@ class Router:
 
     def handle_update(self, parsed_msg: Dict[str, Any], src_network: str):
         """Handle 'update' message type."""
-        self.update_msgs.append(parsed_msg)
+        self.routing_table.update_msgs[
+            (parsed_msg['msg']['network'], parsed_msg['msg']['netmask'], parsed_msg['src'])] = parsed_msg
         self.routing_table.add_route(
             parsed_msg['msg']['network'], parsed_msg['msg']['netmask'],
             parsed_msg['src'], parsed_msg['msg']['localpref'],
@@ -387,6 +454,8 @@ class Router:
             parsed_msg['msg']['selfOrigin']
         )
         self.advertise_update(parsed_msg['msg'], src_network)
+        # Check for aggregations
+        self.routing_table.aggregate_networks()
 
     def handle_data(self, parsed_msg: Dict[str, Any], src_network: str):
         """Handle 'data' message type."""
@@ -416,13 +485,13 @@ class Router:
 
     def handle_withdraw(self, parsed_msg: Dict[str, Any], src_network: str):
         """Handle 'withdraw' message type."""
-        print(f"Routing Table before withdraw:\n{self.routing_table}")
+        del self.routing_table.update_msgs[
+            (parsed_msg['msg'][0]['network'], parsed_msg['msg'][0]['netmask'], parsed_msg['src'])]
         self.routing_table.remove_route(
             parsed_msg['msg'][0]['network'],
             parsed_msg['msg'][0]['netmask'],
             parsed_msg['src']
         )
-        print(f"Routing Table after withdraw:\n{self.routing_table}")
         self.advertise_withdraw(parsed_msg['msg'], src_network)
 
     def send_no_route_message(self, parsed_msg: Dict[str, Any], src_network: str):
@@ -434,7 +503,6 @@ class Router:
             "msg": parsed_msg,
         }
         self.send(src_network, json.dumps(no_route_message))
-        print(f"No route found for destination {parsed_msg['dst']}. Dropping packet.")
 
     def is_transit_allowed(self, src_relation: str, dst_relation: str) -> bool:
         """
