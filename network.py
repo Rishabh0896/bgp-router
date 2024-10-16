@@ -1,23 +1,47 @@
 class IPAddress:
     def __init__(self, ip_string):
+        """
+        Initialize the IPAddress object.
+
+        Args:
+            ip_string (str): A string representing an IPv4 address in dotted-decimal notation.
+        """
         self.octets = list(map(int, ip_string.split('.')))
 
     def __str__(self):
+        """
+        Return a string representation of the IP address.
+
+        Returns:
+            str: The IP address in dotted-decimal notation.
+        """
         return '.'.join(map(str, self.octets))
 
     def to_int(self):
+        """
+        Convert the IP address to an integer.
+
+        Returns:
+            int: The integer representation of the IP address.
+        """
         return sum(octet << (24 - 8 * i) for i, octet in enumerate(self.octets))
 
     def to_binary(self):
+        """
+        Convert the IP address to a binary string.
+
+        Returns:
+            str: A 32-bit string of 0s and 1s representing the IPv4 address
+        """
         return ''.join([format(octet, '08b') for octet in self.octets])
 
     @staticmethod
     def binary_to_ip_string(binary_string):
         """
-        Convert a binary string to an IP address string in dotted-decimal notation.
+        Convert a binary string to an IP address string
 
         Args:
-            binary_string (str): A string of 0s and 1s representing an IP address.
+            binary_string (str): A string of 0s and 1s representing an IP address
 
         Returns:
             str: A string representing the IP address in dotted-decimal notation.
@@ -51,8 +75,14 @@ class IPAddress:
     def __hash__(self):
         return hash(tuple(self.octets))
 
-
 class Network:
+    """
+    A class to represent a network with an IP address and subnet mask.
+
+    Attributes:
+        ip (IPAddress): An IPAddress object representing the network address.
+        mask (IPAddress): An IPAddress object representing the subnet mask.
+    """
     def __init__(self, ip_string, mask_string):
         self.ip = IPAddress(ip_string)
         self.mask = IPAddress(mask_string)

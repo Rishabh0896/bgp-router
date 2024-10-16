@@ -5,6 +5,7 @@ import argparse
 from router import Router
 
 if __name__ == "__main__":
+    # parse arguments
     parser = argparse.ArgumentParser(description='route packets')
     parser.add_argument('asn', type=int, help="AS number of this router")
     parser.add_argument('connections', metavar='connections', type=str, nargs='+', help="connections")

@@ -79,7 +79,7 @@ class RoutingTable:
         network_key = Network(network, subnet_mask)
         self.routes[network_key].append(entry)
 
-        # Check for aggregations
+        # Check for aggregations after every addition
         self.aggregate_networks()
 
     def get_prefix_length(self, network_ip: str, ip_to_check: str) -> int:
@@ -99,9 +99,22 @@ class RoutingTable:
         return len(network_ip)
 
     def _extract_network_block(self, network: Network) -> str:
+        """
+        Extract the network block from a given Network object.
+
+        Args:
+            network (Network): A Network object
+
+        Returns:
+            str: A binary string representing the network block, with a length equal to
+                 the number of '1' bits in the subnet mask
+        """
+        # convert IP and mask part to binary
         network_ip_binary = network.ip.to_binary()
         network_mask_binary = network.mask.to_binary()
+        # perform AND operation
         r1 = ''.join(str(int(a) & int(b)) for a, b in zip(network_ip_binary, network_mask_binary))
+        # extract block of significant digits for network
         return r1[:network_mask_binary.count('1')]
 
     def find_longest_prefix_matches(self, ip_string: str) -> List[Network]:
@@ -119,9 +132,11 @@ class RoutingTable:
         matches = []
         longest_prefix = -1
 
+        # iterate through routes to check if network block matches current IP
         for network, routes in self.routes.items():
             network_block = self._extract_network_block(network)
 
+            # if matching network portion, see if it is the longest prefix match
             if ip_to_check_binary.startswith(network_block):
                 prefix_match = self.get_prefix_length(network.ip.to_binary(), ip_to_check_binary)
                 matches.append((network, prefix_match))
@@ -176,14 +191,16 @@ class RoutingTable:
         """
         network_key = Network(network_str, subnet_mask)
         if network_key in self.routes:
+            # if the network block being withdrawn exists in routing table
             self.routes[network_key] = [route for route in self.routes[network_key]
                                         if str(route.next_hop_ip) != next_hop_ip]
             if not self.routes[network_key]:
                 del self.routes[network_key]
         else:
-            # Possible aggregation so rebuild the entire routing table based on the update messages
-            # Empty the whole routing table and recreate based on the update_msgs dictionary
-            self.routes.clear()
+            # if network block is not in routing table, means it was aggregated
+            # so rebuild the entire routing table based on the update messages
+            self.routes.clear() # empty table
+            # Recreate based on the update_msgs dictionary
             for key, msg in self.update_msgs.items():
                 network_ip, network_mask, next_hop_ip = key
                 self.add_route(network_ip, network_mask, next_hop_ip, msg['msg']['localpref'], msg['msg']['ASPath'],
@@ -217,19 +234,32 @@ class RoutingTable:
 
         return table_str
 
-    def can_networks_aggregate(self, network_i, network_j):
+    def can_networks_aggregate(self, network_i: str, network_j: str) -> bool:
+        """
+        Determines if two networks can be aggregated based on their routes and network blocks
+
+        Args:
+            network_i (str): The first network
+            network_j (str): The second network
+
+        Returns:
+            bool: True if the networks can be aggregated, False otherwise.
+        """
         route_i = self.routes[network_i]
         route_j = self.routes[network_j]
+
+        # if route not pointing to same location
         if route_i != route_j:
             return False
+
+        # parse network portion of both
         network_block_i = self._extract_network_block(network_i)
         network_block_j = self._extract_network_block(network_j)
-        # Check if the last character is different in the network block
-        if len(network_block_i) != len(network_block_j):
-            return False
+        # check if previous bits (aside from last one) are the same
         for i in range(len(network_block_i) - 1):
             if network_block_i[i] != network_block_j[i]:
                 return False
+        # Check if the last character is different in the network block
         if network_block_i[-1] == network_block_j[-1]:
             return False
         return True
