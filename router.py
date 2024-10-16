@@ -255,6 +255,9 @@ class RoutingTable:
         # parse network portion of both
         network_block_i = self._extract_network_block(network_i)
         network_block_j = self._extract_network_block(network_j)
+        # Check if the last character is different in the network block
+        if len(network_block_i) != len(network_block_j):
+            return False
         # check if previous bits (aside from last one) are the same
         for i in range(len(network_block_i) - 1):
             if network_block_i[i] != network_block_j[i]:
